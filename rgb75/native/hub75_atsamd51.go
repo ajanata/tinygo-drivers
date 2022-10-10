@@ -1,3 +1,4 @@
+//go:build sam && atsamd51
 // +build sam,atsamd51
 
 // Hardware interface implementation of GPIO-driven HUB75 RGB LED matrix panels
@@ -10,6 +11,21 @@ import (
 	"runtime/interrupt"
 	"runtime/volatile"
 )
+
+// hub75 is a singleton, for implementing interface type Hub75, and is realized
+// by the exported variable HUB75 below.
+//
+// The actual Hub75 interface elaborations are hardware-dependent and are
+// implemented in build-contrained (per target arch) source files.
+type hub75 struct {
+	maskR1, maskG1, maskB1, maskR2, maskG2, maskB2 uint32
+	maskRGB, groupRGB                              uint32
+	maskCLK                                        uint32
+	maskA, maskB, maskC, maskD, maskE              uint32
+	maskAddr, groupAddr                            uint32
+
+	handleRow func()
+}
 
 // Timer/counter peripherals configuration
 const (

@@ -83,20 +83,5 @@ type Hub75 interface {
 	PauseTimer() uint32
 }
 
-// hub75 is a singleton, for implementing interface type Hub75, and is realized
-// by the exported variable HUB75 below.
-//
-// The actual Hub75 interface elaborations are hardware-dependent and are
-// implemented in build-contrained (per target arch) source files.
-type hub75 struct {
-	maskR1, maskG1, maskB1, maskR2, maskG2, maskB2 uint32
-	maskRGB, groupRGB                              uint32
-	maskCLK                                        uint32
-	maskA, maskB, maskC, maskD, maskE              uint32
-	maskAddr, groupAddr                            uint32
-
-	handleRow func()
-}
-
 // HUB75 represents the physical HUB75 connector for RGB LED matrices.
 var HUB75 = &hub75{}
