@@ -4,10 +4,14 @@
 package ssd1306 // import "tinygo.org/x/drivers/ssd1306"
 
 import (
+	"device/sam"
 	"errors"
 	"image/color"
 	"machine"
 	"time"
+	"unsafe"
+
+	"github.com/aykevl/things/hub75"
 
 	"tinygo.org/x/drivers"
 )
@@ -16,6 +20,7 @@ import (
 type Device struct {
 	bus        Buser
 	buffer     []byte
+	dmaBuf     []byte
 	width      int16
 	height     int16
 	bufferSize int16
@@ -97,8 +102,30 @@ func (d *Device) Configure(cfg Config) {
 		d.vccState = SWITCHCAPVCC
 	}
 	d.bufferSize = d.width * d.height / 8
-	d.buffer = make([]byte, d.bufferSize)
+	d.dmaBuf = make([]byte, d.bufferSize+1)
+	d.buffer = d.dmaBuf[1:]
 	d.canReset = cfg.Address != 0 || d.width != 128 || d.height != 64 // I2C or not 128x64
+
+	// XXX hacky shit
+	d.dmaBuf[0] = 0x40
+	// hub75.DmaDescriptorSection[1].
+	hub75.DmaDescriptorSection[1] = hub75.DmaDescriptor{
+		Btctrl: (1 << 0) | // VALID: Descriptor Valid
+			(0 << 3) | // BLOCKACT=NOACT: Block Action
+			(1 << 10) | // SRCINC: Source Address Increment Enable
+			(0 << 11) | // DSTINC: Destination Address Increment Enable
+			(1 << 12) | // STEPSEL=SRC: Step Selection
+			(0 << 13), // STEPSIZE=X1: Address Increment Step Size
+		Dstaddr: unsafe.Pointer(&machine.I2C0.Bus.DATA.Reg),
+	}
+
+	// Reset channel.
+	sam.DMAC.CHANNEL[1].CHCTRLA.ClearBits(sam.DMAC_CHANNEL_CHCTRLA_ENABLE)
+	sam.DMAC.CHANNEL[1].CHCTRLA.SetBits(sam.DMAC_CHANNEL_CHCTRLA_SWRST)
+
+	// Configure channel.
+	sam.DMAC.CHANNEL[1].CHPRILVL.Set(0)
+	sam.DMAC.CHANNEL[1].CHCTRLA.Set((sam.DMAC_CHANNEL_CHCTRLA_TRIGACT_BURST << sam.DMAC_CHANNEL_CHCTRLA_TRIGACT_Pos) | (0x0F << sam.DMAC_CHANNEL_CHCTRLA_TRIGSRC_Pos) | (sam.DMAC_CHANNEL_CHCTRLA_BURSTLEN_SINGLE << sam.DMAC_CHANNEL_CHCTRLA_BURSTLEN_Pos))
 
 	d.bus.configure()
 
@@ -192,7 +219,19 @@ func (d *Device) Display() error {
 		d.Command(uint8(d.height/8) - 1)
 	}
 
-	d.Tx(d.buffer, false)
+	// XXX hacky shit
+	machine.I2C0.Bus.ADDR.Set(0x3D << 1)
+
+	// For some reason, you have to provide the address just past the end of the
+	// array instead of the address of the array.
+	descriptor := &hub75.DmaDescriptorSection[1]
+	descriptor.Srcaddr = unsafe.Pointer(uintptr(unsafe.Pointer(&d.dmaBuf[0])) + uintptr(len(d.dmaBuf)))
+	descriptor.Btcnt = uint16(len(d.dmaBuf)) // beat count
+
+	// Start the transfer.
+	sam.DMAC.CHANNEL[1].CHCTRLA.SetBits(sam.DMAC_CHANNEL_CHCTRLA_ENABLE)
+
+	// d.Tx(d.buffer, false)
 	return nil
 }
 
@@ -223,7 +262,7 @@ func (d *Device) GetPixel(x int16, y int16) bool {
 // SetBuffer changes the whole buffer at once
 func (d *Device) SetBuffer(buffer []byte) error {
 	if int16(len(buffer)) != d.bufferSize {
-		//return ErrBuffer
+		// return ErrBuffer
 		return errors.New("wrong size buffer")
 	}
 	for i := int16(0); i < d.bufferSize; i++ {
