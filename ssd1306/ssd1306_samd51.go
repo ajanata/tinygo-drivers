@@ -6,12 +6,19 @@ package ssd1306
 import (
 	"device/sam"
 	"machine"
+	"runtime"
+	"runtime/interrupt"
+	"sync/atomic"
 	"unsafe"
 )
 
 type DMAConfig struct {
+	// DMAChannel is the DMA channel to use.
+	DMAChannel uint8
+	// DMADescriptor is the descriptor for the specified DMA channel.
 	DMADescriptor *DMADescriptor
-	DMAChannel    uint8
+	// TriggerSource is the DMA trigger source, e.g. SERCOM5_DMAC_ID_TX = 0x0F. This must be for the sercom used for
+	// bus in the constructor.
 	TriggerSource uint32
 }
 
@@ -22,6 +29,7 @@ type I2CDMABus struct {
 	dmaDescriptor *DMADescriptor
 	dmaChannel    uint8
 	dmaBuf        []byte
+	busy          atomic.Bool
 
 	cfg *DMAConfig
 }
@@ -34,10 +42,11 @@ type DMADescriptor struct {
 	Descaddr unsafe.Pointer
 }
 
-// NewI2CDMA creates a new driver using I2C over DMA for data transfers (but not command transfers).
-// Currently, overlapped transfers are not prevented. Callers should ensure to not call Display() too often or corruption
-// of the display will likely occur.
-// DMA must be properly initialized first.
+// NewI2CDMA creates a new driver using I2C with DMA for data transfers (but not command transfers).
+// The DMA controller must be properly initialized first.
+// The interrupt handler must be hooked up by the caller; see TXComplete. If you fail to do this, the second call to
+// Display will hang.
+// If the I2C bus is to be used with other peripherals, ensure that Busy returns false before using it.
 func NewI2CDMA(bus *machine.I2C, cfg *DMAConfig) *Device {
 	b := &I2CDMABus{
 		wire:    bus,
@@ -81,15 +90,24 @@ func (b *I2CDMABus) configure() {
 	sam.DMAC.CHANNEL[b.dmaChannel].CHPRILVL.Set(0)
 	sam.DMAC.CHANNEL[b.dmaChannel].CHCTRLA.Set((sam.DMAC_CHANNEL_CHCTRLA_TRIGACT_BURST << sam.DMAC_CHANNEL_CHCTRLA_TRIGACT_Pos) | (b.cfg.TriggerSource << sam.DMAC_CHANNEL_CHCTRLA_TRIGSRC_Pos) | (sam.DMAC_CHANNEL_CHCTRLA_BURSTLEN_SINGLE << sam.DMAC_CHANNEL_CHCTRLA_BURSTLEN_Pos))
 
+	// Enable transfer complete interrupt.
+	sam.DMAC.CHANNEL[b.dmaChannel].CHINTENSET.Set(sam.DMAC_CHANNEL_CHINTENSET_TCMPL)
+
 	// we don't need this anymore, so let it get GC'd
 	b.cfg = nil
 }
 
 func (b *I2CDMABus) tx(data []byte, isCommand bool) {
+	// check for in-flight transfers before commands as well so the DMA doesn't mess with the data being sent by the command
+	for b.busy.Load() {
+		runtime.Gosched()
+	}
 	if isCommand {
 		// use synchronous, slow communication for commands since we have to wait for execution anyway
 		b.wire.WriteRegister(uint8(b.Address), 0x00, data)
 	} else {
+		b.busy.Store(true)
+
 		// fire the data via DMA
 		b.wire.Bus.ADDR.Set(uint32(b.Address << 1))
 
@@ -100,11 +118,34 @@ func (b *I2CDMABus) tx(data []byte, isCommand bool) {
 
 		// Start the transfer.
 		sam.DMAC.CHANNEL[b.dmaChannel].CHCTRLA.SetBits(sam.DMAC_CHANNEL_CHCTRLA_ENABLE)
-
-		// TODO interrupt when the transfer is over, so we don't overlap transfers
 	}
 }
 
 func (b *I2CDMABus) setAddress(address uint16) {
 	b.Address = address
+}
+
+// TXComplete is the interrupt handler for DMA transfer completions. You must hook this up yourself with something like
+//
+//	i2cInt := interrupt.New(sam.IRQ_DMAC_1, dispDMAInt)
+//
+//	func dispDMAInt(i interrupt.Interrupt) {
+//		disp.TXComplete(i)
+//	}
+//
+// from your code (using the appropriate interrupt number). This must be done by you and not here because the interrupt
+// number is required to be a constant by the compiler. You must define a function instead of using one inline because
+// the compiler does not allow closures for interrupt handlers. Also ensure to enable that interrupt and possibly set
+// its priority.
+func (d *Device) TXComplete(_ interrupt.Interrupt) {
+	b := d.bus.(*I2CDMABus)
+	sam.DMAC.CHANNEL[b.dmaChannel].SetCHINTFLAG_TCMPL(1)
+	b.busy.Store(false)
+}
+
+// Busy returns whether the I2C bus is busy with a background DMA transfer. Once this returns false, this driver will
+// not initiate another transfer without Display() being called, so it is safe to use the I2C bus for other purposes.
+func (d *Device) Busy() bool {
+	b := d.bus.(*I2CDMABus)
+	return b.busy.Load()
 }
