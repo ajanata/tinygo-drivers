@@ -47,6 +47,7 @@ type Buser interface {
 	configure()
 	tx(data []byte, isCommand bool)
 	setAddress(address uint16)
+	busy() bool
 }
 
 type VccMode uint8
@@ -303,7 +304,16 @@ func (b *SPIBus) tx(data []byte, isCommand bool) {
 	}
 }
 
+func (b *I2CBus) busy() bool { return false }
+func (b *SPIBus) busy() bool { return false }
+
 // Size returns the current size of the display.
 func (d *Device) Size() (w, h int16) {
 	return d.width, d.height
+}
+
+// Busy returns whether the bus is busy with a background DMA transfer. Once this returns false, this driver will
+// not initiate another transfer without Display() being called, so it is safe to use the bus for other purposes.
+func (d *Device) Busy() bool {
+	return d.bus.busy()
 }

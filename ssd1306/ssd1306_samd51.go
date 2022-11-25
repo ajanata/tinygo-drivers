@@ -29,7 +29,7 @@ type I2CDMABus struct {
 	dmaDescriptor *DMADescriptor
 	dmaChannel    uint8
 	dmaBuf        []byte
-	busy          atomic.Bool
+	active        atomic.Bool
 
 	cfg *DMAConfig
 }
@@ -99,14 +99,14 @@ func (b *I2CDMABus) configure() {
 
 func (b *I2CDMABus) tx(data []byte, isCommand bool) {
 	// check for in-flight transfers before commands as well so the DMA doesn't mess with the data being sent by the command
-	for b.busy.Load() {
+	for b.active.Load() {
 		runtime.Gosched()
 	}
 	if isCommand {
 		// use synchronous, slow communication for commands since we have to wait for execution anyway
 		b.wire.WriteRegister(uint8(b.Address), 0x00, data)
 	} else {
-		b.busy.Store(true)
+		b.active.Store(true)
 
 		// fire the data via DMA
 		b.wire.Bus.ADDR.Set(uint32(b.Address << 1))
@@ -125,6 +125,10 @@ func (b *I2CDMABus) setAddress(address uint16) {
 	b.Address = address
 }
 
+func (b *I2CDMABus) busy() bool {
+	return b.active.Load()
+}
+
 // TXComplete is the interrupt handler for DMA transfer completions. You must hook this up yourself with something like
 //
 //	i2cInt := interrupt.New(sam.IRQ_DMAC_1, dispDMAInt)
@@ -140,12 +144,5 @@ func (b *I2CDMABus) setAddress(address uint16) {
 func (d *Device) TXComplete(_ interrupt.Interrupt) {
 	b := d.bus.(*I2CDMABus)
 	sam.DMAC.CHANNEL[b.dmaChannel].SetCHINTFLAG_TCMPL(1)
-	b.busy.Store(false)
-}
-
-// Busy returns whether the I2C bus is busy with a background DMA transfer. Once this returns false, this driver will
-// not initiate another transfer without Display() being called, so it is safe to use the I2C bus for other purposes.
-func (d *Device) Busy() bool {
-	b := d.bus.(*I2CDMABus)
-	return b.busy.Load()
+	b.active.Store(false)
 }
