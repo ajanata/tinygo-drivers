@@ -99,7 +99,6 @@ func (d *Device) Configure(cfg Config) {
 	d.bufferSize = d.width * d.height / 8
 	d.buffer = make([]byte, d.bufferSize)
 	d.canReset = cfg.Address != 0 || d.width != 128 || d.height != 64 // I2C or not 128x64
-
 	d.bus.configure()
 
 	time.Sleep(100 * time.Nanosecond)
@@ -223,7 +222,7 @@ func (d *Device) GetPixel(x int16, y int16) bool {
 // SetBuffer changes the whole buffer at once
 func (d *Device) SetBuffer(buffer []byte) error {
 	if int16(len(buffer)) != d.bufferSize {
-		//return ErrBuffer
+		// return ErrBuffer
 		return errors.New("wrong size buffer")
 	}
 	for i := int16(0); i < d.bufferSize; i++ {
