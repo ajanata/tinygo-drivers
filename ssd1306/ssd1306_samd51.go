@@ -79,7 +79,7 @@ func (b *I2CDMABus) configure() {
 			(0 << 11) | // DSTINC: Destination Address Increment Enable
 			(1 << 12) | // STEPSEL=SRC: Step Selection
 			(0 << 13), // STEPSIZE=X1: Address Increment Step Size
-		Dstaddr: unsafe.Pointer(&machine.I2C0.Bus.DATA.Reg),
+		Dstaddr: unsafe.Pointer(&b.wire.Bus.DATA.Reg),
 	}
 
 	// Reset channel.
