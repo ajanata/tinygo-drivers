@@ -16,7 +16,7 @@ import (
 	"tinygo.org/x/drivers"
 )
 
-const DefaultAddress = 0x20
+const DefaultAddress = 0x38
 
 type Device struct {
 	bus  drivers.I2C
