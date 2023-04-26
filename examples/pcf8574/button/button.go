@@ -28,7 +28,9 @@ func main() {
 	}
 
 	dev = pcf8574.New(machine.I2C0)
-	dev.Configure(pcf8574.Config{})
+	dev.Configure(pcf8574.Config{
+		Address: 0x20,
+	})
 
 	if intPin != machine.NoPin {
 		intPin.Configure(machine.PinConfig{

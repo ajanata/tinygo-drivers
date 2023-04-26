@@ -16,6 +16,7 @@ import (
 	"tinygo.org/x/drivers"
 )
 
+// DefaultAddress is the default address for newer chips. Older chips are 0x20.
 const DefaultAddress = 0x38
 
 type Device struct {
