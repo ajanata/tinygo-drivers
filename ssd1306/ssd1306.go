@@ -267,6 +267,8 @@ func (b *SPIBus) configure() {
 	b.resetPin.Low()
 	time.Sleep(10 * time.Millisecond)
 	b.resetPin.High()
+
+	b.csPin.High()
 }
 
 // Tx sends data to the display
@@ -286,16 +288,16 @@ func (b *I2CBus) tx(data []byte, isCommand bool) {
 // tx sends data to the display (SPIBus implementation)
 func (b *SPIBus) tx(data []byte, isCommand bool) {
 	if isCommand {
-		b.csPin.High()
-		time.Sleep(1 * time.Millisecond)
+		// b.csPin.High()
+		// time.Sleep(1 * time.Millisecond)
 		b.dcPin.Low()
 		b.csPin.Low()
 
 		b.wire.Tx(data, nil)
 		b.csPin.High()
 	} else {
-		b.csPin.High()
-		time.Sleep(1 * time.Millisecond)
+		// b.csPin.High()
+		// time.Sleep(1 * time.Millisecond)
 		b.dcPin.High()
 		b.csPin.Low()
 
