@@ -8,6 +8,7 @@ import (
 	"machine"
 
 	"tinygo.org/x/drivers"
+	"tinygo.org/x/drivers/internal/legacy"
 	"tinygo.org/x/drivers/touch"
 )
 
@@ -79,7 +80,8 @@ func (d *Device) Read() []byte {
 func (d *Device) ReadTouchPoint() touch.Point {
 	d.Read()
 	z := 0xFFFFF
-	if d.buf[0] == 0 {
+	switch d.buf[0] {
+	case 0, 255:
 		z = 0
 	}
 
@@ -98,10 +100,10 @@ func (d *Device) Touched() bool {
 }
 
 func (d *Device) write1Byte(reg, data uint8) {
-	d.bus.WriteRegister(d.Address, reg, []byte{data})
+	legacy.WriteRegister(d.bus, d.Address, reg, []byte{data})
 }
 
 func (d *Device) read8bit(reg uint8) uint8 {
-	d.bus.ReadRegister(d.Address, reg, d.buf[:1])
+	legacy.ReadRegister(d.bus, d.Address, reg, d.buf[:1])
 	return d.buf[0]
 }

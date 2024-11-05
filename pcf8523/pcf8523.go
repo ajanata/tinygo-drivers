@@ -1,13 +1,10 @@
-// Package pcf8523 implements a driver for the PCF8523 Real-Time Clock (RTC), providing basic read-write of the current
-// time only. The PCF8523 itself supports alarms, clock drift compensation, and timer interrupts, but those features
-// remain unimplemented.
+// Package pcf8523 implements a driver for the PCF8523 CMOS Real-Time Clock (RTC)
 //
 // Datasheet: https://www.nxp.com/docs/en/data-sheet/PCF8523.pdf
 package pcf8523
 
 import (
 	"time"
-
 	"tinygo.org/x/drivers"
 )
 
@@ -19,84 +16,74 @@ type Device struct {
 func New(i2c drivers.I2C) Device {
 	return Device{
 		bus:     i2c,
-		Address: Address,
+		Address: DefaultAddress,
 	}
 }
 
-func (d *Device) LostPower() (bool, error) {
-	buf := [1]byte{}
-	err := d.bus.ReadRegister(d.Address, Status, buf[:])
-	if err != nil {
-		return false, err
-	}
-	return buf[0]&0xF0 == 0xF0, nil
+// Reset resets the device according to the datasheet section 8.3
+// This does not wipe the time registers, but resets control registers.
+func (d *Device) Reset() (err error) {
+	return d.bus.Tx(uint16(d.Address), []byte{rControl1, 0x58}, nil)
 }
 
-func (d *Device) Initialized() (bool, error) {
-	buf := [1]byte{}
-	err := d.bus.ReadRegister(d.Address, Control3, buf[:])
-	if err != nil {
-		return false, err
-	}
-	return buf[0]&0xE0 != 0xE0, nil
+// SetPowerManagement configures how the device makes use of the backup battery, see
+// datasheet section 8.5
+func (d *Device) SetPowerManagement(b PowerManagement) error {
+	return d.setRegister(rControl3, byte(b)<<5, 0xE0)
 }
 
-func (d *Device) Set(t time.Time) error {
-	rbuf := [1]byte{}
-	err := d.bus.ReadRegister(d.Address, Control1, rbuf[:])
+func (d *Device) setRegister(reg uint8, value, mask uint8) error {
+	var buf [1]byte
+	err := d.bus.Tx(uint16(d.Address), []byte{reg}, buf[:])
 	if err != nil {
 		return err
 	}
-	// do not change cap_sel or second/alarm/correction interrupts
-	// ensure RTC is running and 24-hour mode is selected
-	rbuf[0] &= 0b1000_0111
-	err = d.bus.WriteRegister(d.Address, Control1, rbuf[:])
-	if err != nil {
-		return err
-	}
+	buf[0] = (value & mask) | (buf[0] & (^mask))
+	return d.bus.Tx(uint16(d.Address), []byte{reg, buf[0]}, nil)
+}
 
+// SetTime sets the time and date
+func (d *Device) SetTime(t time.Time) error {
 	buf := []byte{
-		decToBcd(t.Second()),
-		decToBcd(t.Minute()),
-		decToBcd(t.Hour()),
-		decToBcd(t.Day()),
-		decToBcd(int(t.Weekday())),
-		decToBcd(int(t.Month())),
-		decToBcd(t.Year() - 2000),
+		rSeconds,
+		bin2bcd(t.Second()),
+		bin2bcd(t.Minute()),
+		bin2bcd(t.Hour()),
+		bin2bcd(t.Day()),
+		bin2bcd(int(t.Weekday())),
+		bin2bcd(int(t.Month())),
+		bin2bcd(t.Year() - 2000),
 	}
-	err = d.bus.WriteRegister(d.Address, Time, buf)
-	if err != nil {
-		return err
-	}
-	// turn on battery switchover mode, turn off battery-related interrupts
-	return d.bus.WriteRegister(d.Address, Control3, []byte{0})
+
+	return d.bus.Tx(uint16(d.Address), buf, nil)
 }
 
-func (d *Device) Now() (time.Time, error) {
-	buf := [7]byte{}
-	err := d.bus.ReadRegister(d.Address, Time, buf[:])
+// ReadTime returns the date and time
+func (d *Device) ReadTime() (time.Time, error) {
+	buf := make([]byte, 9)
+	err := d.bus.Tx(uint16(d.Address), []byte{rSeconds}, buf)
 	if err != nil {
 		return time.Time{}, err
 	}
 
-	seconds := bcdToDec(buf[0] & 0x7F)
-	minute := bcdToDec(buf[1] % 0x7F)
-	hour := bcdToDec(buf[2] & 0x3F)
-	day := bcdToDec(buf[3] & 0x3F)
-	// we don't need to read the weekday
-	month := time.Month(bcdToDec(buf[5] & 0x1F))
-	year := int(bcdToDec(buf[6])) + 2000
+	seconds := bcd2bin(buf[0] & 0x7F)
+	minute := bcd2bin(buf[1] & 0x7F)
+	hour := bcd2bin(buf[2] & 0x3F)
+	day := bcd2bin(buf[3] & 0x3F)
+	//skipping weekday buf[4]
+	month := time.Month(bcd2bin(buf[5] & 0x1F))
+	year := int(bcd2bin(buf[6])) + 2000
 
 	t := time.Date(year, month, day, hour, minute, seconds, 0, time.UTC)
 	return t, nil
 }
 
-// decToBcd converts int to BCD
-func decToBcd(dec int) uint8 {
+// bin2bcd converts binary to BCD
+func bin2bcd(dec int) uint8 {
 	return uint8(dec + 6*(dec/10))
 }
 
-// bcdToDec converts BCD to int
-func bcdToDec(bcd uint8) int {
+// bcd2bin converts BCD to binary
+func bcd2bin(bcd uint8) int {
 	return int(bcd - 6*(bcd>>4))
 }

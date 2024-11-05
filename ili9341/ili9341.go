@@ -5,19 +5,22 @@ import (
 	"image/color"
 	"machine"
 	"time"
+
+	"tinygo.org/x/drivers"
+	"tinygo.org/x/drivers/pixel"
 )
 
 type Config struct {
 	Width            int16
 	Height           int16
-	Rotation         Rotation
+	Rotation         drivers.Rotation
 	DisplayInversion bool
 }
 
 type Device struct {
 	width    int16
 	height   int16
-	rotation Rotation
+	rotation drivers.Rotation
 	driver   driver
 
 	x0, x1 int16 // cached address window; prevents useless/expensive
@@ -28,6 +31,9 @@ type Device struct {
 	rst machine.Pin
 	rd  machine.Pin
 }
+
+// Image buffer type used in the ili9341.
+type Image = pixel.Image[pixel.RGB565BE]
 
 var cmdBuf [6]byte
 
@@ -136,10 +142,12 @@ func (d *Device) Configure(config Config) {
 
 // Size returns the current size of the display.
 func (d *Device) Size() (x, y int16) {
-	if d.rotation == 1 || d.rotation == 3 {
+	switch d.rotation {
+	case Rotation90, Rotation270, Rotation90Mirror, Rotation270Mirror:
 		return d.height, d.width
+	default: // Rotation0, Rotation180, etc
+		return d.width, d.height
 	}
-	return d.width, d.height
 }
 
 // SetPixel modifies the internal buffer.
@@ -156,7 +164,21 @@ func (d *Device) Display() error {
 	return nil
 }
 
+// EnableTEOutput enables the TE ("tearing effect") line.
+// The TE line goes high when the screen is not currently being updated and can
+// be used to start drawing. When used correctly, it can avoid tearing entirely.
+func (d *Device) EnableTEOutput(on bool) {
+	if on {
+		cmdBuf[0] = 0
+		d.sendCommand(TEON, cmdBuf[:1]) // M=0 (V-blanking only, no H-blanking)
+	} else {
+		d.sendCommand(TEOFF, nil) // TEOFF
+	}
+}
+
 // DrawRGBBitmap copies an RGB bitmap to the internal buffer at given coordinates
+//
+// Deprecated: use DrawBitmap instead.
 func (d *Device) DrawRGBBitmap(x, y int16, data []uint16, w, h int16) error {
 	k, i := d.Size()
 	if x < 0 || y < 0 || w <= 0 || h <= 0 ||
@@ -171,6 +193,8 @@ func (d *Device) DrawRGBBitmap(x, y int16, data []uint16, w, h int16) error {
 }
 
 // DrawRGBBitmap8 copies an RGB bitmap to the internal buffer at given coordinates
+//
+// Deprecated: use DrawBitmap instead.
 func (d *Device) DrawRGBBitmap8(x, y int16, data []uint8, w, h int16) error {
 	k, i := d.Size()
 	if x < 0 || y < 0 || w <= 0 || h <= 0 ||
@@ -182,6 +206,13 @@ func (d *Device) DrawRGBBitmap8(x, y int16, data []uint8, w, h int16) error {
 	d.driver.write8sl(data)
 	d.endWrite()
 	return nil
+}
+
+// DrawBitmap copies the bitmap to the internal buffer on the screen at the
+// given coordinates. It returns once the image data has been sent completely.
+func (d *Device) DrawBitmap(x, y int16, bitmap Image) error {
+	width, height := bitmap.Size()
+	return d.DrawRGBBitmap8(x, y, bitmap.RawBuffer(), int16(width), int16(height))
 }
 
 // FillRectangle fills a rectangle at given coordinates with a color
@@ -241,13 +272,41 @@ func (d *Device) FillScreen(c color.RGBA) {
 	}
 }
 
-// GetRotation returns the current rotation of the device
-func (d *Device) GetRotation() Rotation {
+// Set the sleep mode for this LCD panel. When sleeping, the panel uses a lot
+// less power. The LCD won't display an image anymore, but the memory contents
+// will be kept.
+func (d *Device) Sleep(sleepEnabled bool) error {
+	if sleepEnabled {
+		// Shut down LCD panel.
+		d.sendCommand(SLPIN, nil)
+		time.Sleep(5 * time.Millisecond) // 5ms required by the datasheet
+	} else {
+		// Turn the LCD panel back on.
+		d.sendCommand(SLPOUT, nil)
+		// Note: the ili9341 documentation says that it is needed to wait at
+		// least 120ms before going to sleep again. Sleeping here would not be
+		// practical (delays turning on the screen too much), so just hope the
+		// screen won't need to sleep again for at least 120ms.
+		// In practice, it's unlikely the user will set the display to sleep
+		// again within 120ms.
+	}
+	return nil
+}
+
+// Rotation returns the current rotation of the device.
+func (d *Device) Rotation() drivers.Rotation {
 	return d.rotation
 }
 
-// SetRotation changes the rotation of the device (clock-wise)
-func (d *Device) SetRotation(rotation Rotation) {
+// GetRotation returns the current rotation of the device.
+//
+// Deprecated: use Rotation instead.
+func (d *Device) GetRotation() drivers.Rotation {
+	return d.rotation
+}
+
+// SetRotation changes the rotation of the device (clock-wise).
+func (d *Device) SetRotation(rotation drivers.Rotation) error {
 	madctl := uint8(0)
 	switch rotation % 8 {
 	case Rotation0:
@@ -255,30 +314,37 @@ func (d *Device) SetRotation(rotation Rotation) {
 	case Rotation90:
 		madctl = MADCTL_MV | MADCTL_BGR
 	case Rotation180:
-		madctl = MADCTL_MY | MADCTL_BGR
+		madctl = MADCTL_MY | MADCTL_BGR | MADCTL_ML
 	case Rotation270:
-		madctl = MADCTL_MX | MADCTL_MY | MADCTL_MV | MADCTL_BGR
+		madctl = MADCTL_MX | MADCTL_MY | MADCTL_MV | MADCTL_BGR | MADCTL_ML
 	case Rotation0Mirror:
 		madctl = MADCTL_BGR
 	case Rotation90Mirror:
-		madctl = MADCTL_MY | MADCTL_MV | MADCTL_BGR
+		madctl = MADCTL_MY | MADCTL_MV | MADCTL_BGR | MADCTL_ML
 	case Rotation180Mirror:
-		madctl = MADCTL_MX | MADCTL_MY | MADCTL_BGR
+		madctl = MADCTL_MX | MADCTL_MY | MADCTL_BGR | MADCTL_ML
 	case Rotation270Mirror:
-		madctl = MADCTL_MX | MADCTL_MY | MADCTL_MV | MADCTL_BGR
+		madctl = MADCTL_MX | MADCTL_MY | MADCTL_MV | MADCTL_BGR | MADCTL_ML
 	}
 	cmdBuf[0] = madctl
 	d.sendCommand(MADCTL, cmdBuf[:1])
 	d.rotation = rotation
+	return nil
 }
 
 // SetScrollArea sets an area to scroll with fixed top/bottom or left/right parts of the display
 // Rotation affects scroll direction
 func (d *Device) SetScrollArea(topFixedArea, bottomFixedArea int16) {
+	if d.height < 320 {
+		// The screen doesn't use the full 320 pixel height.
+		// Enlarge the bottom fixed area to fill the 320 pixel height, so that
+		// bottomFixedArea starts from the visible bottom of the screen.
+		bottomFixedArea += 320 - d.height
+	}
 	cmdBuf[0] = uint8(topFixedArea >> 8)
 	cmdBuf[1] = uint8(topFixedArea)
-	cmdBuf[2] = uint8(d.height - topFixedArea - bottomFixedArea>>8)
-	cmdBuf[3] = uint8(d.height - topFixedArea - bottomFixedArea)
+	cmdBuf[2] = uint8((320 - topFixedArea - bottomFixedArea) >> 8)
+	cmdBuf[3] = uint8(320 - topFixedArea - bottomFixedArea)
 	cmdBuf[4] = uint8(bottomFixedArea >> 8)
 	cmdBuf[5] = uint8(bottomFixedArea)
 	d.sendCommand(VSCRDEF, cmdBuf[:6])

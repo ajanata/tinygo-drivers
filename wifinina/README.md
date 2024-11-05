@@ -6,7 +6,7 @@ The way this driver works is by using the SPI interface of your microcontroller 
 
 ## Using the WiFiNINA Driver
 
-For information on how to use this driver, please take a look at the examples located in the [examples/wifinina](../examples/wifinina) directory.
+For information on how to use this driver, please take a look at the examples located in the [examples/net](../examples/net) directory.
 
 ## Firmware
 
@@ -103,3 +103,19 @@ Verify correct version of nina-fw installed by flasing `CheckFirmwareVersion.ino
 Adafruit provides very good instructions for updating their boards that provide a ESP32 WiFi-BLE co-processor. For more information, please see:
 
 https://learn.adafruit.com/upgrading-esp32-firmware
+
+## Updating the driver
+
+If you modify the WiFiNINA status or command codes, you will also need to regenerate the display strings.
+
+```
+go generate ./wifinina/status.go ./wifinina/commands.go
+```
+
+## Debugging
+
+You can output debug information to the serial console by using the `wifidebug` tag.
+
+```
+tinygo flash -target pyportal -ldflags="-X main.ssid=something -X main.pass=somethingelse" -tags=wifidebug -monitor ./examples/wifinina/webclient/
+```

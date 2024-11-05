@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"tinygo.org/x/drivers"
+	"tinygo.org/x/drivers/internal/legacy"
 )
 
 type Mode uint8
@@ -37,7 +38,7 @@ func (d *Device) Configure() bool {
 // IsTimeValid return true/false is the time in the device is valid
 func (d *Device) IsTimeValid() bool {
 	data := []byte{0}
-	err := d.bus.ReadRegister(uint8(d.Address), REG_STATUS, data)
+	err := legacy.ReadRegister(d.bus, uint8(d.Address), REG_STATUS, data)
 	if err != nil {
 		return false
 	}
@@ -47,7 +48,7 @@ func (d *Device) IsTimeValid() bool {
 // IsRunning returns if the oscillator is running
 func (d *Device) IsRunning() bool {
 	data := []uint8{0}
-	err := d.bus.ReadRegister(uint8(d.Address), REG_CONTROL, data)
+	err := legacy.ReadRegister(d.bus, uint8(d.Address), REG_CONTROL, data)
 	if err != nil {
 		return false
 	}
@@ -57,7 +58,7 @@ func (d *Device) IsRunning() bool {
 // SetRunning starts the internal oscillator
 func (d *Device) SetRunning(isRunning bool) error {
 	data := []uint8{0}
-	err := d.bus.ReadRegister(uint8(d.Address), REG_CONTROL, data)
+	err := legacy.ReadRegister(d.bus, uint8(d.Address), REG_CONTROL, data)
 	if err != nil {
 		return err
 	}
@@ -66,22 +67,32 @@ func (d *Device) SetRunning(isRunning bool) error {
 	} else {
 		data[0] |= 1 << EOSC
 	}
-	err = d.bus.WriteRegister(uint8(d.Address), REG_CONTROL, data)
+	err = legacy.WriteRegister(d.bus, uint8(d.Address), REG_CONTROL, data)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-// SetTime sets the date and time in the DS3231
+// SetTime sets the date and time in the DS3231. The DS3231 hardware supports
+// only a 2-digit year field, so the current year will be stored as an offset
+// from the year 2000, which supports the year 2000 until 2100.
+//
+// The DS3231 also supports a one-bit 'century' flag which is set by the chip
+// when the year field rolls over from 99 to 00. The current code interprets
+// this flag to be the year 2100, which appears to extend the range of years
+// until the year 2200. However the DS3231 does not incorporate the 'century'
+// flag in its leap year calculation, so it will incorrectly identify the year
+// 2100 as a leap year, causing it to increment from 2100-02-28 to 2100-02-29
+// instead of 2100-03-01.
 func (d *Device) SetTime(dt time.Time) error {
 	data := []byte{0}
-	err := d.bus.ReadRegister(uint8(d.Address), REG_STATUS, data)
+	err := legacy.ReadRegister(d.bus, uint8(d.Address), REG_STATUS, data)
 	if err != nil {
 		return err
 	}
 	data[0] &^= 1 << OSF
-	err = d.bus.WriteRegister(uint8(d.Address), REG_STATUS, data)
+	err = legacy.WriteRegister(d.bus, uint8(d.Address), REG_STATUS, data)
 	if err != nil {
 		return err
 	}
@@ -92,6 +103,10 @@ func (d *Device) SetTime(dt time.Time) error {
 	data[2] = uint8ToBCD(uint8(dt.Hour()))
 
 	year := uint8(dt.Year() - 2000)
+	// This code interprets the centuryFlag to be the year 2100. Warning: The
+	// DS3231 does not incorporate the centuryFlag in its leap year calculation.
+	// It will increment from 2100-02-28 to 2100-02-29, which is incorrect because
+	// the year 2100 is not a leap year in the Gregorian calendar.
 	centuryFlag := uint8(0)
 	if year >= 100 {
 		year -= 100
@@ -103,7 +118,7 @@ func (d *Device) SetTime(dt time.Time) error {
 	data[5] = uint8ToBCD(uint8(dt.Month()) | centuryFlag)
 	data[6] = uint8ToBCD(year)
 
-	err = d.bus.WriteRegister(uint8(d.Address), REG_TIMEDATE, data)
+	err = legacy.WriteRegister(d.bus, uint8(d.Address), REG_TIMEDATE, data)
 	if err != nil {
 		return err
 	}
@@ -114,7 +129,7 @@ func (d *Device) SetTime(dt time.Time) error {
 // ReadTime returns the date and time
 func (d *Device) ReadTime() (dt time.Time, err error) {
 	data := make([]uint8, 7)
-	err = d.bus.ReadRegister(uint8(d.Address), REG_TIMEDATE, data)
+	err = legacy.ReadRegister(d.bus, uint8(d.Address), REG_TIMEDATE, data)
 	if err != nil {
 		return
 	}
@@ -136,11 +151,31 @@ func (d *Device) ReadTime() (dt time.Time, err error) {
 // ReadTemperature returns the temperature in millicelsius (mC)
 func (d *Device) ReadTemperature() (int32, error) {
 	data := make([]uint8, 2)
-	err := d.bus.ReadRegister(uint8(d.Address), REG_TEMP, data)
+	err := legacy.ReadRegister(d.bus, uint8(d.Address), REG_TEMP, data)
 	if err != nil {
 		return 0, err
 	}
-	return int32(data[0])*1000 + int32((data[1]>>6)*25)*10, nil
+	return milliCelsius(data[0], data[1]), nil
+}
+
+// milliCelsius converts the raw temperature bytes (msb and lsb) from the DS3231
+// into a 32-bit signed integer in units of milli Celsius (1/1000 deg C).
+//
+// According to the DS3231 datasheet: "Temperature is represented as a 10-bit
+// code with a resolution of 0.25 deg C and is accessible at location 11h and
+// 12h. The temperature is encoded in two's complement format. The upper 8 bits,
+// the integer portion, are at location 11h and the lower 2 bits, the fractional
+// portion, are in the upper nibble at location 12h."
+//
+// In other words, the msb and lsb bytes should be treated as a signed 16-bit
+// integer in units of (1/256 deg C). It is possible to convert this into a
+// 16-bit signed integer in units of centi Celsius (1/100 deg C) with no loss of
+// precision or dynamic range. But for backwards compatibility, let's instead
+// convert this into a 32-bit signed integer in units of milli Celsius.
+func milliCelsius(msb uint8, lsb uint8) int32 {
+	t256 := int16(uint16(msb)<<8 | uint16(lsb))
+	t1000 := int32(t256) / 64 * 250
+	return t1000
 }
 
 // uint8ToBCD converts a byte to BCD for the DS3231
